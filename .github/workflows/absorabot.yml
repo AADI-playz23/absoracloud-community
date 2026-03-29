@@ -1,0 +1,69 @@
+name: AbsoraBot AI Engine
+
+on:
+  push:
+    paths:
+      - 'db/posts/**.json'
+      - 'db/comments/**.json'
+
+# Prevent concurrent AI runs from conflicting with each other
+concurrency:
+  group: absorabot-queue
+  cancel-in-progress: false
+
+jobs:
+  run-ai:
+    runs-on: ubuntu-latest
+    
+    # CRITICAL: Prevent the bot from replying to itself and creating an infinite loop
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Gemini SDK
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-generativeai
+
+      - name: Process New Posts and Trigger AI
+        env:
+          # Pulls your API key securely from GitHub Repository Secrets
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          # Find the newly added JSON files in this specific push
+          ADDED_FILES=$(git diff --name-only --diff-filter=A HEAD~1 HEAD | grep '\.json$' || true)
+          
+          for file in $ADDED_FILES; do
+            echo "Checking file: $file"
+            # Pass the file path to your Python script
+            export POST_FILE="$file"
+            python scripts/absorabot.py
+          done
+
+      - name: Commit AI Response to Database
+        run: |
+          git config user.name "AbsoraBot"
+          git config user.email "bot@absoracloud.com"
+          git add db/comments/
+          
+          # Only commit if the Python script actually generated a new file
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "AbsoraBot generated AI response"
+            
+            # Smart push with retry logic in case a human user posts at the exact same time
+            for i in {1..5}; do
+              git pull --rebase origin main || git rebase --abort
+              git push origin main && break || sleep 4
+            done
+          else
+            echo "No AI action required for this push."
+          fi
